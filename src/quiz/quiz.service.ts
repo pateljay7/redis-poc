@@ -1,9 +1,15 @@
 import { Injectable, Inject } from '@nestjs/common';
 import { CACHE_MANAGER, Cache } from '@nestjs/cache-manager';
+import { RedisClientType, createClient } from 'redis';
 
 @Injectable()
 export class QuizService {
-  constructor(@Inject(CACHE_MANAGER) private cacheManager: Cache) {}
+  private redisClient: RedisClientType;
+
+  constructor(@Inject(CACHE_MANAGER) private cacheManager: Cache) {
+    this.redisClient = createClient({ url: 'redis://localhost:6379' });
+    this.redisClient.connect();
+  }
 
   private questions = [
     {
@@ -222,11 +228,56 @@ export class QuizService {
   async getQuizQuestions() {
     const cachedQuestions = await this.cacheManager.get('quiz_questions');
     if (cachedQuestions) {
-      console.log('Return from cachedQuestionsf');
+      console.log('Return from cached questions');
       return cachedQuestions;
     }
 
     await this.cacheManager.set('quiz_questions', this.questions, 30000); // Cache for 5 mins
     return this.questions;
+  }
+
+  async submitAnswer(userId: string, questionId: number, answerId: number) {
+    const question = this.questions.find((q) => q.id === questionId);
+    if (!question) {
+      return { success: false, message: 'Invalid question' };
+    }
+
+    const isCorrect = question.answer === answerId;
+    let newScore = 0;
+
+    if (isCorrect) {
+      newScore = await this.redisClient.zIncrBy(
+        'quiz_leaderboard',
+        10,
+        userId.toString(),
+      );
+    } else {
+      newScore =
+        (await this.redisClient.zScore(
+          'quiz_leaderboard',
+          userId.toString(),
+        )) || 0;
+    }
+
+    return {
+      success: true,
+      correct: isCorrect,
+      message: isCorrect ? 'Correct answer!' : 'Wrong answer!',
+      currentScore: newScore,
+    };
+  }
+
+  async getLeaderboard() {
+    const leaderboard = await this.redisClient.zRangeWithScores(
+      'quiz_leaderboard',
+      0,
+      -1,
+      { REV: true },
+    );
+    return leaderboard.map((entry, index) => ({
+      rank: index + 1,
+      userId: entry.value,
+      score: entry.score,
+    }));
   }
 }
