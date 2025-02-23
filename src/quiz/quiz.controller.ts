@@ -25,4 +25,18 @@ export class QuizController {
   getLeaderboard() {
     return this.quizService.getLeaderboard();
   }
+
+  @Post('create/user')
+  async createUser(@Body() body) {
+    return this.quizService.createUser(
+      body.user_id,
+      body.display_name,
+      body.country,
+    );
+  }
+
+  @Post('reset')
+  async resetQuiz() {
+    return this.quizService.resetQuiz();
+  }
 }

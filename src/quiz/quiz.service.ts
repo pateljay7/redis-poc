@@ -232,11 +232,17 @@ export class QuizService {
       return cachedQuestions;
     }
 
-    await this.cacheManager.set('quiz_questions', this.questions, 30000); // Cache for 5 mins
+    await this.cacheManager.set('quiz_questions', this.questions, 30000);
     return this.questions;
   }
 
   async submitAnswer(userId: string, questionId: number, answerId: number) {
+    // Check if user exists in Redis Hash
+    const userExists = await this.redisClient.exists(`user:${userId}`);
+    if (!userExists) {
+      return { success: false, message: 'User not found' };
+    }
+
     const question = this.questions.find((q) => q.id === questionId);
     if (!question) {
       return { success: false, message: 'Invalid question' };
@@ -246,12 +252,17 @@ export class QuizService {
     let newScore = 0;
 
     if (isCorrect) {
+      // Increase leaderboard score
       newScore = await this.redisClient.zIncrBy(
         'quiz_leaderboard',
         10,
         userId.toString(),
       );
+
+      // Update user's stored points in hSet
+      await this.redisClient.hIncrBy(`user:${userId}`, 'points', 10);
     } else {
+      // Get current score if the answer is wrong
       newScore =
         (await this.redisClient.zScore(
           'quiz_leaderboard',
@@ -268,16 +279,70 @@ export class QuizService {
   }
 
   async getLeaderboard() {
+    // Fetch leaderboard data from Redis sorted set
     const leaderboard = await this.redisClient.zRangeWithScores(
       'quiz_leaderboard',
       0,
       -1,
       { REV: true },
     );
-    return leaderboard.map((entry, index) => ({
-      rank: index + 1,
-      userId: entry.value,
-      score: entry.score,
-    }));
+
+    // Fetch user details for each leaderboard entry
+    const leaderboardWithDetails = await Promise.all(
+      leaderboard.map(async (entry, index) => {
+        const userId = entry.value;
+        const userDetails = await this.redisClient.hGetAll(`user:${userId}`);
+
+        return {
+          rank: index + 1,
+          userId,
+          name: userDetails.name || 'Unknown',
+          country: userDetails.country || 'Unknown',
+          score: entry.score,
+        };
+      }),
+    );
+
+    return leaderboardWithDetails;
+  }
+
+  async createUser(userId: string, displayName: string, country: string) {
+    // Store user details in Redis Hash using hSet
+    await this.redisClient.hSet(`user:${userId}`, {
+      name: displayName,
+      points: 0,
+      country,
+    });
+
+    // Add user to leaderboard sorted set using zAdd
+    await this.redisClient.zAdd('quiz_leaderboard', [
+      { score: 0, value: userId },
+    ]);
+
+    // Get user rank (0-based index)
+    const rank = await this.redisClient.zRevRank('quiz_leaderboard', userId);
+
+    return {
+      user_id: userId,
+      display_name: displayName,
+      points: 0,
+      rank: rank !== null ? rank + 1 : null, // Convert 0-based to 1-based rank
+      country,
+    };
+  }
+
+  async resetQuiz() {
+    // Delete the leaderboard
+    await this.redisClient.del('quiz_leaderboard');
+
+    // Get all user keys with prefix 'user:'
+    const userKeys: string[] = await this.redisClient.keys('user:*');
+
+    // await this.redisClient.
+    if (userKeys.length > 0) {
+      await this.redisClient.del(userKeys);
+    }
+
+    return { success: true, message: 'Quiz has been reset successfully' };
   }
 }
