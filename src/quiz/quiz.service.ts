@@ -270,12 +270,22 @@ export class QuizService {
         )) || 0;
     }
 
+    // Log recent activity
+    await this.logQuizActivity(userId, questionId, isCorrect);
+
     return {
       success: true,
       correct: isCorrect,
       message: isCorrect ? 'Correct answer!' : 'Wrong answer!',
       currentScore: newScore,
     };
+  }
+
+  async getUserRecentActivity(userId: string) {
+    const key = `quiz_activity:${userId}`;
+    const logs = await this.redisClient.lRange(key, 0, 9); // Get last 10 logs
+
+    return logs.map((log) => JSON.parse(log));
   }
 
   async getLeaderboard() {
@@ -329,6 +339,23 @@ export class QuizService {
       rank: rank !== null ? rank + 1 : null, // Convert 0-based to 1-based rank
       country,
     };
+  }
+
+  async logQuizActivity(
+    userId: string,
+    questionId: number,
+    isCorrect: boolean,
+  ) {
+    const logEntry = JSON.stringify({
+      questionId,
+      status: isCorrect ? 'Correct' : 'Wrong',
+      timestamp: Date.now(),
+    });
+
+    const key = `quiz_activity:${userId}`;
+
+    await this.redisClient.lPush(key, logEntry);
+    await this.redisClient.lTrim(key, 0, 9); // Keep only last 10 entries
   }
 
   async resetQuiz() {

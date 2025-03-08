@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Post } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post } from '@nestjs/common';
 import { QuizService } from './quiz.service';
 
 @Controller('quiz')
@@ -33,6 +33,12 @@ export class QuizController {
       body.display_name,
       body.country,
     );
+  }
+
+  @Get('user/:userId/recent-activity')
+  async getUserRecentActivity(@Param('userId') userId: string) {
+    const activity = await this.quizService.getUserRecentActivity(userId);
+    return { userId, recentActivity: activity };
   }
 
   @Post('reset')
