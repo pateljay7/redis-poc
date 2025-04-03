@@ -316,12 +316,18 @@ export class QuizService {
     return leaderboardWithDetails;
   }
 
-  async createUser(userId: string, displayName: string, country: string) {
+  async createUser(
+    userId: string,
+    displayName: string,
+    country: string,
+    phoneNumber: string,
+  ) {
     // Store user details in Redis Hash using hSet
     await this.redisClient.hSet(`user:${userId}`, {
       name: displayName,
       points: 0,
       country,
+      phone: phoneNumber,
     });
 
     // Add user to leaderboard sorted set using zAdd
@@ -332,13 +338,54 @@ export class QuizService {
     // Get user rank (0-based index)
     const rank = await this.redisClient.zRevRank('quiz_leaderboard', userId);
 
+    // Send OTP to the user's phone number
+    const otp = await this.sendOTP(userId);
+
     return {
       user_id: userId,
       display_name: displayName,
       points: 0,
       rank: rank !== null ? rank + 1 : null, // Convert 0-based to 1-based rank
       country,
+      phone: phoneNumber,
+      otpSent: otp.success,
     };
+  }
+
+  async sendOTP(userId: string): Promise<{ success: boolean; otp: string }> {
+    // Generate a 6-digit OTP
+    const otp = (
+      Math.floor(Math.random() * (999999 - 100000 + 1)) + 100000
+    ).toString();
+
+    // Store OTP in Redis with a TTL of 5 minutes
+    const key = `otp:${userId}`;
+    await this.redisClient.set(key, otp, { EX: 300 });
+
+    // Simulate sending OTP (e.g., via SMS)
+    console.log(`OTP for user ${userId}: ${otp}`);
+
+    return { success: true, otp };
+  }
+
+  async verifyOTP(
+    userId: string,
+    otp: string,
+  ): Promise<{ success: boolean; message: string }> {
+    const key = `otp:${userId}`;
+    const storedOtp = await this.redisClient.get(key);
+
+    if (!storedOtp) {
+      return { success: false, message: 'OTP expired or not found' };
+    }
+
+    if (storedOtp === otp) {
+      // Delete OTP after successful verification
+      await this.redisClient.del(key);
+      return { success: true, message: 'OTP verified successfully' };
+    }
+
+    return { success: false, message: 'Invalid OTP' };
   }
 
   async logQuizActivity(

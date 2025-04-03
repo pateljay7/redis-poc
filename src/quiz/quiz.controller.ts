@@ -27,12 +27,26 @@ export class QuizController {
   }
 
   @Post('create/user')
-  async createUser(@Body() body) {
+  async createUser(
+    @Body()
+    body: {
+      user_id: string;
+      display_name: string;
+      country: string;
+      phone: string;
+    },
+  ) {
     return this.quizService.createUser(
       body.user_id,
       body.display_name,
       body.country,
+      body.phone,
     );
+  }
+
+  @Post('verify-otp')
+  async verifyOTP(@Body() body: { user_id: string; otp: string }) {
+    return this.quizService.verifyOTP(body.user_id, body.otp);
   }
 
   @Get('user/:userId/recent-activity')
