@@ -1,16 +1,16 @@
-import { Injectable, Inject } from '@nestjs/common';
-import { CACHE_MANAGER, Cache } from '@nestjs/cache-manager';
+import { Injectable } from '@nestjs/common';
 import { RedisClientType, createClient } from 'redis';
 
 @Injectable()
 export class QuizService {
   private redisClient: RedisClientType;
 
-  constructor(@Inject(CACHE_MANAGER) private cacheManager: Cache) {
+  constructor() {
     this.redisClient = createClient({ url: 'redis://localhost:6379' });
     this.redisClient.connect();
   }
 
+  // In-memory list of quiz questions
   private questions = [
     {
       id: 1,
@@ -225,97 +225,42 @@ export class QuizService {
     },
   ];
 
+  /**
+   * Retrieves quiz questions.
+   * - Checks if questions are cached in Redis.
+   * - If not cached, stores them in Redis for future use.
+   *
+   * - To Save/Retrieve key-value pair data
+   */
   async getQuizQuestions() {
-    const cachedQuestions = await this.cacheManager.get('quiz_questions');
+    const cachedQuestions = await this.redisClient.get('quiz_questions');
     if (cachedQuestions) {
       console.log('Return from cached questions');
       return cachedQuestions;
     }
 
-    await this.cacheManager.set('quiz_questions', this.questions, 30000);
+    await this.redisClient.set(
+      'quiz_questions',
+      JSON.stringify(this.questions),
+      { EX: 30000 },
+    );
     return this.questions;
   }
 
-  async submitAnswer(userId: string, questionId: number, answerId: number) {
-    // Check if user exists in Redis Hash
-    const userExists = await this.redisClient.exists(`user:${userId}`);
-    if (!userExists) {
-      return { success: false, message: 'User not found' };
-    }
-
-    const question = this.questions.find((q) => q.id === questionId);
-    if (!question) {
-      return { success: false, message: 'Invalid question' };
-    }
-
-    const isCorrect = question.answer === answerId;
-    let newScore = 0;
-
-    if (isCorrect) {
-      // Increase leaderboard score
-      newScore = await this.redisClient.zIncrBy(
-        'quiz_leaderboard',
-        10,
-        userId.toString(),
-      );
-
-      // Update user's stored points in hSet
-      await this.redisClient.hIncrBy(`user:${userId}`, 'points', 10);
-    } else {
-      // Get current score if the answer is wrong
-      newScore =
-        (await this.redisClient.zScore(
-          'quiz_leaderboard',
-          userId.toString(),
-        )) || 0;
-    }
-
-    // Log recent activity
-    await this.logQuizActivity(userId, questionId, isCorrect);
-
-    return {
-      success: true,
-      correct: isCorrect,
-      message: isCorrect ? 'Correct answer!' : 'Wrong answer!',
-      currentScore: newScore,
-    };
-  }
-
-  async getUserRecentActivity(userId: string) {
-    const key = `quiz_activity:${userId}`;
-    const logs = await this.redisClient.lRange(key, 0, 9); // Get last 10 logs
-
-    return logs.map((log) => JSON.parse(log));
-  }
-
-  async getLeaderboard() {
-    // Fetch leaderboard data from Redis sorted set
-    const leaderboard = await this.redisClient.zRangeWithScores(
-      'quiz_leaderboard',
-      0,
-      -1,
-      { REV: true },
-    );
-
-    // Fetch user details for each leaderboard entry
-    const leaderboardWithDetails = await Promise.all(
-      leaderboard.map(async (entry, index) => {
-        const userId = entry.value;
-        const userDetails = await this.redisClient.hGetAll(`user:${userId}`);
-
-        return {
-          rank: index + 1,
-          userId,
-          name: userDetails.name || 'Unknown',
-          country: userDetails.country || 'Unknown',
-          score: entry.score,
-        };
-      }),
-    );
-
-    return leaderboardWithDetails;
-  }
-
+  /**
+   * Creates a new user.
+   * - Stores user details in a Redis hash.
+   * - Adds the user to the leaderboard.
+   * - Sends an OTP to the user.
+   *
+   * REDIS HASH
+   * - A Redis hash is a data type that maps a single Redis key to multiple field-value pairs, like a small JSON or a dictionary.
+   *
+   * 🔥 Why use Redis Hash?
+   * - Efficient memory usage for storing structured data
+   * - Great for user profiles, settings, session data, etc.
+   * - Fast access to individual fields
+   */
   async createUser(
     userId: string,
     displayName: string,
@@ -329,6 +274,20 @@ export class QuizService {
       country,
       phone: phoneNumber,
     });
+
+    /*
+     * What is a Sorted Set in Redis?
+      - A Sorted Set is a special data type in Redis that combines:
+      - A Set: all elements are unique
+      - A Score: each element has a numeric score
+      - Automatic Sorting: elements are kept sorted by score, low to high
+
+     * ✅ Use Cases
+        - Leaderboards / High scores
+        - Priority queues
+        - Task scheduling with timestamps as scores
+        - Time-series ranking (e.g., top 10 trending items) 
+     */
 
     // Add user to leaderboard sorted set using zAdd
     await this.redisClient.zAdd('quiz_leaderboard', [
@@ -352,6 +311,130 @@ export class QuizService {
     };
   }
 
+  /**
+   * Submits an answer for a user.
+   * - Validates the user's existence and the question.
+   * - Updates the leaderboard and user points if the answer is correct.
+   * - Logs the user's activity.
+   *
+   * Redis Commands:
+   * - `EXISTS key`: Checks if a key exists.
+   * - `ZINCRBY key increment member`: Increments the score of a member in a sorted set.
+   * - `HINCRBY key field increment`: Increments a field in a hash.
+   */
+  async submitAnswer(userId: string, questionId: number, answerId: number) {
+    // Check if user exists in Redis Hash
+    const userExists = await this.redisClient.exists(`user:${userId}`);
+    if (!userExists) {
+      return { success: false, message: 'User not found' };
+    }
+
+    const question = this.questions.find((q) => q.id === questionId);
+    if (!question) {
+      return { success: false, message: 'Invalid question' };
+    }
+
+    const isCorrect = question.answer === answerId;
+    let newScore = 0;
+
+    if (isCorrect) {
+      // Increase leaderboard score
+      // ZINCRBY key increment member	(Increment a member's score)
+      newScore = await this.redisClient.zIncrBy(
+        'quiz_leaderboard',
+        10,
+        userId.toString(),
+      );
+
+      // Update user's stored points in hSet
+      // HINCRBY increments (or decrements) the value of a field in a Redis hash by a given integer.
+      await this.redisClient.hIncrBy(`user:${userId}`, 'points', 10);
+    } else {
+      // Get current score if the answer is wrong
+      newScore =
+        (await this.redisClient.zScore(
+          'quiz_leaderboard',
+          userId.toString(),
+        )) || 0;
+    }
+
+    // Log recent activity
+    await this.logQuizActivity(userId, questionId, isCorrect);
+
+    return {
+      success: true,
+      correct: isCorrect,
+      message: isCorrect ? 'Correct answer!' : 'Wrong answer!',
+      currentScore: newScore,
+    };
+  }
+
+  /**
+   * Retrieves the leaderboard.
+   * - Fetches leaderboard data from a Redis sorted set.
+   * - Retrieves user details for each leaderboard entry.
+   *
+   * Redis Commands:
+   * - `ZRANGE key start stop WITHSCORES`: Retrieves a range of elements from a sorted set with scores.
+   * - `HGETALL key`: Retrieves all fields and values of a hash.
+   */
+  async getLeaderboard() {
+    // Fetch leaderboard data from Redis sorted set
+    const leaderboard = await this.redisClient.zRangeWithScores(
+      'quiz_leaderboard',
+      0,
+      -1,
+      { REV: true },
+    );
+
+    // Fetch user details for each leaderboard entry
+    const leaderboardWithDetails = await Promise.all(
+      leaderboard.map(async (entry, index) => {
+        const userId = entry.value;
+
+        // HGETALL is a Redis command that retrieves all fields and values from a hash key.
+        const userDetails = await this.redisClient.hGetAll(`user:${userId}`);
+
+        return {
+          rank: index + 1,
+          userId,
+          name: userDetails.name || 'Unknown',
+          country: userDetails.country || 'Unknown',
+          score: entry.score,
+        };
+      }),
+    );
+
+    return leaderboardWithDetails;
+  }
+
+  /**
+   * Retrieves the recent quiz activity of a user.
+   * - Fetches the last 10 activity logs from a Redis list.
+   * - Each log entry is stored as a JSON string in Redis and is parsed back into an object.
+   *
+   * Redis Commands:
+   * - `LRANGE key start stop`: Retrieves a range of elements from a list.
+   *
+   * @param userId - The ID of the user whose activity is being retrieved.
+   * @returns An array of parsed activity log objects.
+   */
+  async getUserRecentActivity(userId: string) {
+    const key = `quiz_activity:${userId}`;
+    const logs = await this.redisClient.lRange(key, 0, 9); // Get last 10 logs
+
+    return logs.map((log) => JSON.parse(log));
+  }
+
+  /**
+   * Sends a One-Time Password (OTP) to the user.
+   * - Generates a 6-digit OTP.
+   * - Stores the OTP in Redis with a TTL of 5 minutes.
+   * - Simulates sending the OTP (e.g., via SMS).
+   *
+   * Redis Commands:
+   * - `SET key value EX seconds`: Stores a key-value pair with an expiration time.
+   */
   async sendOTP(userId: string): Promise<{ success: boolean; otp: string }> {
     // Generate a 6-digit OTP
     const otp = (
@@ -388,6 +471,22 @@ export class QuizService {
     return { success: false, message: 'Invalid OTP' };
   }
 
+  /**
+  
+  What is a List in Redis?
+    - A List in Redis is an ordered collection of elements, which allows you to add elements to both the head (left) or the tail (right) of the list.
+    - Lists can store multiple values (like an array or a queue).
+    - They are ordered, meaning the order in which elements are added is maintained.
+  
+  Commands:
+    - LPUSH, RPUSH, LPOP, RPOP, LRANGE, LLEN, LINDEX, LTRIM
+  
+  🔥 Use Cases of Lists:
+    - Queues: Lists are often used to implement queues, as you can use LPUSH to enqueue and RPOP to dequeue.
+    - Message Queues: Store messages in the list, process them, and remove them.
+    - Activity Logs: Use lists to store logs or recent activities, trimming the list to keep it within a limit.
+
+   */
   async logQuizActivity(
     userId: string,
     questionId: number,
@@ -402,12 +501,33 @@ export class QuizService {
     const key = `quiz_activity:${userId}`;
 
     await this.redisClient.lPush(key, logEntry);
+
+    // Trim a list to a specific range
     await this.redisClient.lTrim(key, 0, 9); // Keep only last 10 entries
   }
 
+  /**
+   * Resets the quiz.
+   * - Deletes the leaderboard.
+   * - Deletes all user-related keys.
+   *
+   * Redis Commands:
+   * - `DEL key`: Deletes a key.
+   * - `KEYS pattern`: Retrieves all keys matching a pattern.
+   */
   async resetQuiz() {
     // Delete the leaderboard
     await this.redisClient.del('quiz_leaderboard');
+    await this.redisClient.del('quiz_questions');
+
+    // Get all user activities with prefix 'quiz_activity:'
+    const activityKeys: string[] =
+      await this.redisClient.keys('quiz_activity:*');
+
+    // await this.redisClient.
+    if (activityKeys.length > 0) {
+      await this.redisClient.del(activityKeys);
+    }
 
     // Get all user keys with prefix 'user:'
     const userKeys: string[] = await this.redisClient.keys('user:*');
@@ -415,6 +535,14 @@ export class QuizService {
     // await this.redisClient.
     if (userKeys.length > 0) {
       await this.redisClient.del(userKeys);
+    }
+
+    // Get all user otps with prefix 'user:'
+    const otpKeys: string[] = await this.redisClient.keys('otp:*');
+
+    // await this.redisClient.
+    if (otpKeys.length > 0) {
+      await this.redisClient.del(otpKeys);
     }
 
     return { success: true, message: 'Quiz has been reset successfully' };
