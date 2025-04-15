@@ -1,6 +1,10 @@
 import { Injectable } from '@nestjs/common';
 import { RedisClientType, createClient } from 'redis';
 
+const QUIZ_ACTIVITY_PREFIX = 'quiz_activity:';
+const USER_PREFIX = 'user:';
+const OTP_PREFIX = 'otp:';
+
 @Injectable()
 export class QuizService {
   private redisClient: RedisClientType;
@@ -268,7 +272,7 @@ export class QuizService {
     phoneNumber: string,
   ) {
     // Store user details in Redis Hash using hSet
-    await this.redisClient.hSet(`user:${userId}`, {
+    await this.redisClient.hSet(`${USER_PREFIX}${userId}`, {
       name: displayName,
       points: 0,
       country,
@@ -324,7 +328,7 @@ export class QuizService {
    */
   async submitAnswer(userId: string, questionId: number, answerId: number) {
     // Check if user exists in Redis Hash
-    const userExists = await this.redisClient.exists(`user:${userId}`);
+    const userExists = await this.redisClient.exists(`${USER_PREFIX}${userId}`);
     if (!userExists) {
       return { success: false, message: 'User not found' };
     }
@@ -348,7 +352,7 @@ export class QuizService {
 
       // Update user's stored points in hSet
       // HINCRBY increments (or decrements) the value of a field in a Redis hash by a given integer.
-      await this.redisClient.hIncrBy(`user:${userId}`, 'points', 10);
+      await this.redisClient.hIncrBy(`${USER_PREFIX}${userId}`, 'points', 10);
     } else {
       // Get current score if the answer is wrong
       newScore =
@@ -393,7 +397,9 @@ export class QuizService {
         const userId = entry.value;
 
         // HGETALL is a Redis command that retrieves all fields and values from a hash key.
-        const userDetails = await this.redisClient.hGetAll(`user:${userId}`);
+        const userDetails = await this.redisClient.hGetAll(
+          `${USER_PREFIX}${userId}`,
+        );
 
         return {
           rank: index + 1,
@@ -420,7 +426,7 @@ export class QuizService {
    * @returns An array of parsed activity log objects.
    */
   async getUserRecentActivity(userId: string) {
-    const key = `quiz_activity:${userId}`;
+    const key = `${QUIZ_ACTIVITY_PREFIX}${userId}`;
     const logs = await this.redisClient.lRange(key, 0, 9); // Get last 10 logs
 
     return logs.map((log) => JSON.parse(log));
@@ -442,7 +448,7 @@ export class QuizService {
     ).toString();
 
     // Store OTP in Redis with a TTL of 5 minutes
-    const key = `otp:${userId}`;
+    const key = `${OTP_PREFIX}${userId}`;
     await this.redisClient.set(key, otp, { EX: 300 });
 
     // Simulate sending OTP (e.g., via SMS)
@@ -455,7 +461,7 @@ export class QuizService {
     userId: string,
     otp: string,
   ): Promise<{ success: boolean; message: string }> {
-    const key = `otp:${userId}`;
+    const key = `${OTP_PREFIX}${userId}`;
     const storedOtp = await this.redisClient.get(key);
 
     if (!storedOtp) {
@@ -498,7 +504,7 @@ export class QuizService {
       timestamp: Date.now(),
     });
 
-    const key = `quiz_activity:${userId}`;
+    const key = `${QUIZ_ACTIVITY_PREFIX}${userId}`;
 
     await this.redisClient.lPush(key, logEntry);
 
@@ -517,32 +523,21 @@ export class QuizService {
    */
   async resetQuiz() {
     // Delete the leaderboard
-    await this.redisClient.del('quiz_leaderboard');
-    await this.redisClient.del('quiz_questions');
+    const activityKeys: string[] = await this.redisClient.keys(
+      `${QUIZ_ACTIVITY_PREFIX}*`,
+    );
+    const userKeys: string[] = await this.redisClient.keys(`${USER_PREFIX}*`);
+    const otpKeys: string[] = await this.redisClient.keys(`${OTP_PREFIX}*`);
 
-    // Get all user activities with prefix 'quiz_activity:'
-    const activityKeys: string[] =
-      await this.redisClient.keys('quiz_activity:*');
-
-    // await this.redisClient.
-    if (activityKeys.length > 0) {
-      await this.redisClient.del(activityKeys);
-    }
-
-    // Get all user keys with prefix 'user:'
-    const userKeys: string[] = await this.redisClient.keys('user:*');
-
-    // await this.redisClient.
-    if (userKeys.length > 0) {
-      await this.redisClient.del(userKeys);
-    }
-
-    // Get all user otps with prefix 'user:'
-    const otpKeys: string[] = await this.redisClient.keys('otp:*');
-
-    // await this.redisClient.
-    if (otpKeys.length > 0) {
-      await this.redisClient.del(otpKeys);
+    const keysToDelete = [
+      'quiz_leaderboard',
+      'quiz_questions',
+      ...activityKeys,
+      ...userKeys,
+      ...otpKeys,
+    ];
+    if (keysToDelete.length > 0) {
+      await this.redisClient.del(keysToDelete);
     }
 
     return { success: true, message: 'Quiz has been reset successfully' };
